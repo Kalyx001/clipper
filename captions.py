@@ -1,0 +1,13 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.19
+pydantic==2.10.4
+yt-dlp==2024.12.13
+faster-whisper==1.1.0
+anthropic==0.42.0
+requests==2.32.3
+google-auth==2.37.0
+google-auth-oauthlib==1.2.1
+google-api-python-client==2.157.0
+python-dotenv==1.0.1
+aiofiles==24.1.0
