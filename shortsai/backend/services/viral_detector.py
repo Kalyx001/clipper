@@ -1,16 +1,23 @@
-"""Asks Claude to read the transcript (with timestamps) and pick the
-segments most likely to work as standalone vertical shorts: strong hooks,
-emotional peaks, humor, surprising claims, self-contained stories.
+"""Asks an LLM (via Groq's free API) to read the transcript (with timestamps)
+and pick the segments most likely to work as standalone vertical shorts:
+strong hooks, emotional peaks, humor, surprising claims, self-contained
+stories.
+
+Groq (https://console.groq.com) hosts open models like Llama for free API
+access with no credit card required -- a good fit if you don't want any
+per-request cost. Quality on nuanced judgment calls is a step below Claude,
+but solid for this kind of transcript scoring task.
 """
 import json
 import re
-from anthropic import Anthropic
+import requests
 
-from config import ANTHROPIC_API_KEY, MAX_CLIP_SECONDS, MIN_CLIP_SECONDS
+from config import GROQ_API_KEY, MAX_CLIP_SECONDS, MIN_CLIP_SECONDS
 
-MODEL = "claude-sonnet-5"
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+MODEL = "llama-3.3-70b-versatile"
 
-SYSTEM_PROMPT = """You are an expert short-form video editor who has cut thousands of viral \
+SYSTEM_PROMPT_TEMPLATE = """You are an expert short-form video editor who has cut thousands of viral \
 TikTok/Reels/Shorts clips from long-form video. You are given a timestamped transcript of a \
 video. Identify the {n_min}-{n_max} best possible short clips to extract.
 
@@ -23,7 +30,8 @@ Each clip must:
 Prioritize: emotional intensity, humor, surprising or counter-intuitive claims, concrete \
 storytelling, clear educational payoff, and moments of high energy or conflict.
 
-Respond with ONLY a JSON array (no prose, no markdown fences). Each element:
+Respond with ONLY a JSON object of the form {{"clips": [...]}} (no prose, no markdown fences). \
+Each element of "clips" must look like:
 {{
   "start": <float seconds>,
   "end": <float seconds>,
@@ -32,7 +40,7 @@ Respond with ONLY a JSON array (no prose, no markdown fences). Each element:
   "title": "<punchy title under 60 characters>",
   "hashtags": ["<tag1>", "<tag2>", "<tag3>", "<tag4>", "<tag5>"]
 }}
-Order the array by viral_score descending."""
+Order "clips" by viral_score descending."""
 
 
 def _build_transcript_block(segments: list[dict]) -> str:
@@ -43,39 +51,50 @@ def _build_transcript_block(segments: list[dict]) -> str:
 
 
 def detect_viral_moments(segments: list[dict], video_duration: float) -> list[dict]:
-    if not ANTHROPIC_API_KEY:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set")
+    if not GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY is not set")
 
     n_min, n_max = 3, min(20, max(3, int(video_duration // 90)))
-    system = SYSTEM_PROMPT.format(
+    system = SYSTEM_PROMPT_TEMPLATE.format(
         n_min=n_min, n_max=n_max, min_s=MIN_CLIP_SECONDS, max_s=MAX_CLIP_SECONDS
     )
-
     transcript_block = _build_transcript_block(segments)
 
-    client = Anthropic(api_key=ANTHROPIC_API_KEY)
-    resp = client.messages.create(
-        model=MODEL,
-        max_tokens=4000,
-        system=system,
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"Video duration: {video_duration:.1f} seconds.\n\n"
-                    f"Timestamped transcript:\n{transcript_block}"
-                ),
-            }
-        ],
+    resp = requests.post(
+        GROQ_URL,
+        headers={
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": MODEL,
+            "temperature": 0.4,
+            "max_tokens": 4000,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": system},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Video duration: {video_duration:.1f} seconds.\n\n"
+                        f"Timestamped transcript:\n{transcript_block}"
+                    ),
+                },
+            ],
+        },
+        timeout=120,
     )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Groq API error {resp.status_code}: {resp.text[:500]}")
 
-    raw = "".join(block.text for block in resp.content if block.type == "text").strip()
-    raw = re.sub(r"^```(json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
+    raw = resp.json()["choices"][0]["message"]["content"].strip()
+    raw = re.sub(r"^```(json)?|```$", "", raw, flags=re.MULTILINE).strip()
 
     try:
-        clips = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Could not parse Claude's response as JSON: {e}\nRaw: {raw[:500]}")
+        parsed = json.loads(raw)
+        clips = parsed["clips"] if isinstance(parsed, dict) else parsed
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        raise RuntimeError(f"Could not parse the model's response as JSON: {e}\nRaw: {raw[:500]}")
 
     cleaned = []
     for c in clips:
