@@ -2,8 +2,11 @@
 detection (needs a plain transcript) and for word-by-word burned captions
 (needs per-word start/end times).
 """
+import logging
 from pathlib import Path
 from faster_whisper import WhisperModel
+
+logger = logging.getLogger("transcriber")
 
 from config import WHISPER_MODEL_SIZE, WHISPER_DEVICE, WHISPER_COMPUTE_TYPE
 
@@ -27,8 +30,11 @@ def transcribe(video_path: Path) -> dict:
     segments, _info = model.transcribe(
         str(video_path),
         word_timestamps=True,
-        vad_filter=True,  # skips silence, which also helps clip boundary quality
+        vad_filter=False,
     )
+
+    segments = list(segments)
+    logger.info("transcriber: whisper produced %d raw segments", len(segments))
 
     words = []
     seg_list = []
