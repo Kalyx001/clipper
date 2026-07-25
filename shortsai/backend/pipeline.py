@@ -1,8 +1,11 @@
+import logging
 from pathlib import Path
 
 import db
 from config import OUTPUTS_DIR
-from services import downloader, transcriber, viral_detector, clipper, captions
+from services import downloader, transcriber, viral_detector, clipper, captions, fallback_splitter
+
+logger = logging.getLogger("pipeline")
 
 
 def run_pipeline(job_id: str, source_type: str, source_path_or_url: str, caption_style: str = "tiktok"):
@@ -20,15 +23,31 @@ def run_pipeline(job_id: str, source_type: str, source_path_or_url: str, caption
         info = downloader.probe_video(video_path)
         duration = info["duration"]
 
-        # 2. Transcribe with word-level timestamps
+        # 2. Transcribe with word-level timestamps (best effort)
         db.update_job(job_id, status="transcribing", progress=25, message="Transcribing audio")
         transcript = transcriber.transcribe(video_path)
 
-        # 3. Find viral moments
+        # 3. Find viral moments from the transcript, if there's enough to work with
         db.update_job(job_id, status="analyzing", progress=50, message="Finding viral moments")
-        moments = viral_detector.detect_viral_moments(transcript["segments"], duration)
+        moments = []
+        transcript_chars = len("".join(s["text"] for s in transcript["segments"]))
+        usable_transcript = transcript_chars > 40  # rough "is there actually speech here" check
+        if usable_transcript:
+            try:
+                moments = viral_detector.detect_viral_moments(transcript["segments"], duration)
+            except Exception as e:
+                logger.warning("pipeline: AI moment detection failed, falling back: %s", e)
+                moments = []
+
         if not moments:
-            raise RuntimeError("No viable clips were found in this video")
+            # Fall back to silence-snapped fixed-length segments so a job never
+            # comes back empty just because transcription/AI analysis struggled.
+            db.update_job(job_id, message="No usable transcript -- auto-segmenting by pauses in the audio")
+            silences = fallback_splitter.detect_silences(video_path)
+            moments = fallback_splitter.suggest_clips(duration, silences)
+
+        if not moments:
+            raise RuntimeError("Could not find or generate any viable clips from this video")
 
         # 4. Cut, reframe, and caption each clip
         db.update_job(job_id, status="clipping", progress=60, message=f"Rendering {len(moments)} clips")
