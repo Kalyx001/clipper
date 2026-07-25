@@ -2,7 +2,10 @@ import json
 import shutil
 import threading
 import uuid
+import logging
 from pathlib import Path
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse
