@@ -11,8 +11,11 @@ but solid for this kind of transcript scoring task.
 import json
 import re
 import requests
+import logging
 
 from config import GROQ_API_KEY, MAX_CLIP_SECONDS, MIN_CLIP_SECONDS
+
+logger = logging.getLogger("viral_detector")
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL = "llama-3.3-70b-versatile"
@@ -59,6 +62,12 @@ def detect_viral_moments(segments: list[dict], video_duration: float) -> list[di
         n_min=n_min, n_max=n_max, min_s=MIN_CLIP_SECONDS, max_s=MAX_CLIP_SECONDS
     )
     transcript_block = _build_transcript_block(segments)
+    logger.info(
+        "viral_detector: %d transcript segments, %d chars, duration=%.1fs",
+        len(segments), len(transcript_block), video_duration,
+    )
+    if not transcript_block.strip():
+        raise RuntimeError("Transcription produced no text -- nothing for the model to analyze")
 
     resp = requests.post(
         GROQ_URL,
@@ -88,6 +97,7 @@ def detect_viral_moments(segments: list[dict], video_duration: float) -> list[di
         raise RuntimeError(f"Groq API error {resp.status_code}: {resp.text[:500]}")
 
     raw = resp.json()["choices"][0]["message"]["content"].strip()
+    logger.info("viral_detector: raw model response (first 1000 chars): %s", raw[:1000])
     raw = re.sub(r"^```(json)?|```$", "", raw, flags=re.MULTILINE).strip()
 
     try:
@@ -95,6 +105,8 @@ def detect_viral_moments(segments: list[dict], video_duration: float) -> list[di
         clips = parsed["clips"] if isinstance(parsed, dict) else parsed
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         raise RuntimeError(f"Could not parse the model's response as JSON: {e}\nRaw: {raw[:500]}")
+
+    logger.info("viral_detector: model returned %d raw clip candidates", len(clips))
 
     cleaned = []
     for c in clips:
@@ -112,4 +124,5 @@ def detect_viral_moments(segments: list[dict], video_duration: float) -> list[di
             "title": c.get("title", "Untitled clip"),
             "hashtags": c.get("hashtags", []),
         })
+    logger.info("viral_detector: %d clips survived cleanup", len(cleaned))
     return cleaned
